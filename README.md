@@ -36,6 +36,7 @@ uvicorn api.main:app --reload --port 8000
 # Start UI
 streamlit run app/app.py
 
+##
 	1.	Upload a CSV/Parquet file.
 	2.	Pick engines & tasks; set repetitions (≥10 for headline plots).
 	3.	Results land in results/benchmarks.csv and results/latency.csv.
