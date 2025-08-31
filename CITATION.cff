@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it as below.
+title: SME Research Lab: pandas vs Polars vs DuckDB for single-node analytics
+authors:
+  - family-names: Sojitra
+    given-names: Parth
+date-released: 2025-08-29
+version: 1.0.0
+repository-code: https://github.com/sojitraparth/sme-research
+license: MIT
+abstract: >
+  Benchmark harness, API, and UI to compare pandas, Polars, and DuckDB on
+  SME-typical workloads (ingest, filter, group-by, sort, join) with
+  time/ΔRSS/latency instrumentation. Includes camera-ready figures/tables.
