@@ -1,3 +1,4 @@
+# app.py
 import os, io, time, json, requests, pandas as pd, numpy as np, psutil
 from pathlib import Path
 from datetime import datetime
@@ -5,8 +6,43 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+# ────────────────────────────── PAGE CONFIG ──────────────────────────────
 st.set_page_config(page_title="SME Research", layout="wide", initial_sidebar_state="expanded")
 
+# Force a Light-mode visual layer by default (no auto-dark).
+# Note: Streamlit's core theme can't be changed programmatically; this CSS ensures
+# a light look regardless of user/system auto-dark, and you can opt-in to Dark in Settings.
+if "theme" not in st.session_state:
+    st.session_state["theme"] = "Light"
+
+def _apply_theme():
+    theme = st.session_state.get("theme", "Light")
+    if theme == "Light":
+        st.markdown("""
+        <style>
+        :root { --bg:#f7f7fb; --panel:#ffffff; --border:#ececf2; --text:#111827; }
+        body { background: var(--bg); }
+        section[data-testid="stSidebar"] { background: var(--panel); border-right:1px solid var(--border); }
+        div[data-testid='stMetricValue'] { font-weight:700; }
+        .card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:14px; margin-bottom:10px; }
+        </style>
+        """, unsafe_allow_html=True)
+    else:
+        # Simple Dark variant (opt-in only)
+        st.markdown("""
+        <style>
+        :root { --bg:#0f1220; --panel:#151a2d; --border:#2b3150; --text:#e5e7eb; }
+        body { background: var(--bg); }
+        section[data-testid="stSidebar"] { background: var(--panel); border-right:1px solid var(--border); }
+        div[data-testid='stMetricValue'] { font-weight:700; color:var(--text); }
+        .card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:14px; margin-bottom:10px; color:var(--text); }
+        .stMarkdown, .stText, .stDataFrame, .stPlotlyChart, .stCaption, .stMetric { color:var(--text) !important; }
+        </style>
+        """, unsafe_allow_html=True)
+
+_apply_theme()
+
+# ────────────────────────────── CONSTANTS ──────────────────────────────
 BASE_DIR = Path(__file__).parent
 API = os.environ.get("SME_API", "http://localhost:8000")
 RESULTS_CSV = Path("results/benchmarks.csv")
@@ -14,6 +50,13 @@ LATENCY_CSV = Path("results/latency.csv")
 SWITCH_CSV = Path("results/switch_local_metrics.csv")
 _process = psutil.Process()
 
+# ────────────────────────────── CACHED RESOURCES ──────────────────────────────
+@st.cache_resource
+def duck_con():
+    import duckdb
+    return duckdb.connect()
+
+# ────────────────────────────── UTILITIES / API ──────────────────────────────
 def _rss_mb():
     return _process.memory_info().rss / (1024 * 1024)
 
@@ -28,7 +71,7 @@ def api_upload(filedict):
     try:
         r = requests.post(
             f"{API}/upload",
-            files={"file": (filedict["name"], filedict["bytes"], "application/octet-stream")},
+            files={"file": (filedict["name"], filedict["bytes"], filedict.get("mime", "application/octet-stream"))},
             timeout=120,
         )
         return r.json() if r.ok else {"error": f"{r.status_code} {r.text}"}
@@ -125,10 +168,12 @@ def measure_local_engine(df, engine, sample_cap=200_000, q=0.9, topk=1000):
     df, by, agg_col, sort_col, filter_col = _auto_cols_for_local(df.copy())
     if agg_col is None:
         return {"ok": False, "reason": "no_numeric_cols"}
+
     t0 = time.perf_counter()
     m0 = _rss_mb()
     t_groupby = t_filter = t_sort = None
     rows_g = rows_f = rows_s = None
+
     try:
         if engine == "pandas":
             d = df
@@ -148,6 +193,7 @@ def measure_local_engine(df, engine, sample_cap=200_000, q=0.9, topk=1000):
                 s = d.nlargest(min(topk, len(d)), sort_col) if sort_col in d.columns else d.head(min(topk, len(d)))
                 t_sort = time.perf_counter() - t1
                 rows_s = int(len(s))
+
         elif engine == "polars":
             import polars as pl
             d = pl.from_pandas(df)
@@ -158,18 +204,19 @@ def measure_local_engine(df, engine, sample_cap=200_000, q=0.9, topk=1000):
                 rows_g = int(g.height)
             if filter_col is not None:
                 t1 = time.perf_counter()
-                thr = d.select(pl.col(filter_col).quantile(q)).item()
+                # get scalar via Series before .item()
+                thr = d.select(pl.col(filter_col).quantile(q)).to_series().item()
                 f = d.filter(pl.col(filter_col) > thr)
                 t_filter = time.perf_counter() - t1
                 rows_f = int(f.height)
             if sort_col is not None:
                 t1 = time.perf_counter()
-                s = d.top_k(min(topk, d.height), by=sort_col)
+                s = d.top_k(min(topk, d.height), by=sort_col)  # descending
                 t_sort = time.perf_counter() - t1
                 rows_s = int(s.height)
+
         elif engine == "duckdb":
-            import duckdb
-            con = duckdb.connect()
+            con = duck_con()
             con.register("t", df)
             if by is not None:
                 t1 = time.perf_counter()
@@ -178,7 +225,7 @@ def measure_local_engine(df, engine, sample_cap=200_000, q=0.9, topk=1000):
                 rows_g = int(len(g))
             if filter_col is not None:
                 t1 = time.perf_counter()
-                thr = con.execute(f"SELECT quantile_cont({filter_col}, {q}) FROM t").fetchone()[0]
+                thr = con.execute(f"SELECT quantile_cont({filter_col}, {q}) FROM t WHERE {filter_col} IS NOT NULL").fetchone()[0]
                 f = con.execute(f"SELECT * FROM t WHERE {filter_col} > {thr}").df()
                 t_filter = time.perf_counter() - t1
                 rows_f = int(len(f))
@@ -187,11 +234,11 @@ def measure_local_engine(df, engine, sample_cap=200_000, q=0.9, topk=1000):
                 s = con.execute(f"SELECT * FROM t ORDER BY {sort_col} DESC LIMIT {min(topk, len(df))}").df()
                 t_sort = time.perf_counter() - t1
                 rows_s = int(len(s))
-            con.close()
         else:
             return {"ok": False, "reason": f"unknown_engine:{engine}"}
     except Exception as e:
         return {"ok": False, "reason": str(e)}
+
     mem_delta = _rss_mb() - m0
     t_total = time.perf_counter() - t0
     return {
@@ -203,23 +250,56 @@ def measure_local_engine(df, engine, sample_cap=200_000, q=0.9, topk=1000):
         "t_groupby_s": float(t_groupby) if t_groupby is not None else None,
         "t_filter_s": float(t_filter) if t_filter is not None else None,
         "t_sort_s": float(t_sort) if t_sort is not None else None,
-        "rows_g": rows_g,
-        "rows_f": rows_f,
-        "rows_s": rows_s,
+        "rows_g": rows_g, "rows_f": rows_f, "rows_s": rows_s,
     }
 
-st.markdown(
-    """
-    <style>
-    body {background:#f7f7fb;}
-    section[data-testid='stSidebar'] {background:#ffffff;border-right:1px solid #ececf2;}
-    div[data-testid='stMetricValue'] {font-weight:700;}
-    .card {background:#fff;border:1px solid #ececf2;border-radius:14px;padding:14px;margin-bottom:10px;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ────────────────────────────── GLOBAL ENGINE SELECTOR ──────────────────────────────
+def engine_selector():
+    """Global engine selector with segmented-control fallback; updates session and probes."""
+    engines = ["pandas", "polars", "duckdb"]
+    current = st.session_state.get("ui_engine", "pandas")
 
+    if hasattr(st, "segmented_control"):
+        sel = st.segmented_control(
+            "Engine", engines,
+            default=current,
+            key="ui_engine_seg",
+            help="Select local processing engine for this session",
+            width="content",
+        )
+    else:
+        sel = st.radio(
+            "Engine", engines,
+            index=engines.index(current) if current in engines else 0,
+            horizontal=True,
+            key="ui_engine_radio",
+            help="Select local processing engine for this session",
+        )
+
+    if sel != current:
+        st.session_state["last_local_engine"] = current
+        st.session_state["ui_engine"] = sel
+
+        df_local = st.session_state.get("df_data")
+        if df_local is not None:
+            try:
+                m = measure_local_engine(df_local, sel)
+                if m.get("ok"):
+                    st.session_state.setdefault("last_local_metrics", {})[sel] = m
+                    tg, tf, ts_ = m.get("t_groupby_s"), m.get("t_filter_s"), m.get("t_sort_s")
+                    def _fmt(v): return f"{v:.3f}s" if v is not None else "n/a"
+                    st.info(
+                        f"Switched to {sel}. Total {m['t_total_s']:.3f}s, ΔRSS {m['mem_delta_mb']:.1f} MB. "
+                        f"Groupby {_fmt(tg)}, Filter {_fmt(tf)}, Sort {_fmt(ts_)}."
+                    )
+                else:
+                    st.warning(f"Engine probe skipped: {m.get('reason','unknown')}")
+            except Exception as e:
+                st.warning(f"Probe error: {e}")
+
+        st.rerun()  # refresh rest of the app
+
+# ────────────────────────────── HEADER ──────────────────────────────
 hdr_l, hdr_r = st.columns([0.75, 0.25])
 with hdr_l:
     st.title("SME Research Lab")
@@ -231,12 +311,13 @@ with hdr_r:
     else:
         st.error("API: Offline", icon="🛑")
         st.caption(f"Details: {ver.get('error')}")
+    engine_selector()  # ← global engine switcher in header
 
+# ────────────────────────────── NAVIGATION ──────────────────────────────
 nav = st.sidebar.radio(
     "Navigation",
     ["Upload & Clean", "SME Benchmarks", "Dashboard", "Visualize", "Forecast", "Summary", "Download", "Settings"],
-    index=0,
-    key="nav_main",
+    index=0, key="nav_main",
 )
 
 def get_df():
@@ -246,6 +327,7 @@ def get_df():
         return st.session_state["df_data"]
     return None
 
+# ────────────────────────────── UPLOAD & CLEAN ──────────────────────────────
 if nav == "Upload & Clean":
     st.subheader("Upload & Clean")
     c1, c2 = st.columns([0.55, 0.45])
@@ -269,7 +351,7 @@ if nav == "Upload & Clean":
                         st.success(f"Loaded {df_prev.shape[0]:,} rows × {df_prev.shape[1]:,} columns")
                 with colB:
                     if st.button("Upload to benchmark API", key="btn_upload_api"):
-                        meta = api_upload({"name": st.session_state["upload_name"], "bytes": st.session_state["upload_bytes"]})
+                        meta = api_upload({"name": st.session_state["upload_name"], "bytes": st.session_state["upload_bytes"], "mime": st.session_state.get("upload_mime")})
                         if "error" in meta:
                             st.error(f"Upload failed: {meta['error']}")
                         else:
@@ -280,71 +362,17 @@ if nav == "Upload & Clean":
                     if st.button("Clear uploaded file", key="btn_clear_upload"):
                         for k in ["upload_name","upload_bytes","upload_mime"]:
                             st.session_state.pop(k, None)
-                        st.experimental_rerun()
+                        st.rerun()
             except Exception as e:
                 st.error(f"Preview/Load failed: {e}")
         else:
             st.info("Choose a file to preview or load")
 
     with c2:
-        st.markdown("Engine choice for SME analytics")
-        prev_engine = st.session_state.get("ui_engine", "pandas")
-        current_engine = st.selectbox(
-            "Engine (affects local analytics pages)",
-            ["pandas", "polars", "duckdb"],
-            index=["pandas","polars","duckdb"].index(prev_engine) if prev_engine in ["pandas","polars","duckdb"] else 0,
-            key="ui_engine",
-        )
-        if "df_data" in st.session_state:
-            df_local = st.session_state["df_data"]
-            need_probe = ("last_local_engine" not in st.session_state) or (current_engine != st.session_state.get("last_local_engine")) or ("last_local_metrics" not in st.session_state)
-            if need_probe:
-                m = measure_local_engine(df_local, current_engine)
-                if m.get("ok"):
-                    last = st.session_state.get("last_local_metrics", {}).get(prev_engine)
-                    speed_note = ""
-                    if last and last.get("ok") and m["t_total_s"] > 0:
-                        ratio = last["t_total_s"] / m["t_total_s"]
-                        speed_note = f"{current_engine} is {ratio:.2f}× faster than {prev_engine}"
-                    tg = m.get("t_groupby_s")
-                    tf = m.get("t_filter_s")
-                    ts_ = m.get("t_sort_s")
-                    def _fmt_s(v):
-                        return f"{v:.3f}s" if v is not None else "n/a"
-                    parts = [
-                        f"Switched to {current_engine}.",
-                        f"Total {m['t_total_s']:.3f}s, ΔRSS {m['mem_delta_mb']:.1f} MB.",
-                        f"Groupby {_fmt_s(tg)}, Filter {_fmt_s(tf)}, Sort {_fmt_s(ts_)}."
-                    ]
-                    if speed_note:
-                        parts.append(speed_note)
-                    msg = " ".join(parts)
-                    st.info(msg)
-                    st.session_state.setdefault("last_local_metrics", {})[current_engine] = m
-                    st.session_state["last_local_engine"] = current_engine
-                    _append_switch_log({
-                        "ts": datetime.utcnow().isoformat(),
-                        "dataset_rows": int(len(df_local)),
-                        "prev_engine": prev_engine,
-                        "current_engine": current_engine,
-                        "t_total_s": m["t_total_s"],
-                        "mem_delta_mb": m["mem_delta_mb"],
-                        "t_groupby_s": m.get("t_groupby_s"),
-                        "t_filter_s": m.get("t_filter_s"),
-                        "t_sort_s": m.get("t_sort_s"),
-                        "rows_g": m.get("rows_g"),
-                        "rows_f": m.get("rows_f"),
-                        "rows_s": m.get("rows_s"),
-                    })
-                else:
-                    st.warning(f"Engine probe skipped: {m.get('reason','unknown')}")
-        else:
-            st.caption("Load a dataset to see live engine probe")
-
         st.markdown("Segmentation Filters")
         if "df_data" in st.session_state:
             df_seg = st.session_state["df_data"].copy()
-            for col in df_seg.select_dtypes(include=["object"]).columns:
+            for col in df_seg.select_dtypes(include=["object","category"]).columns:
                 if df_seg[col].nunique() <= 50:
                     choices = sorted(map(str, df_seg[col].dropna().unique()))
                     sel = st.multiselect(col, choices, default=choices, key=f"seg_{col}")
@@ -354,7 +382,7 @@ if nav == "Upload & Clean":
             st.success(f"Filters applied: {df_seg.shape[0]:,} rows")
             if st.button("Clear filters", key="btn_clear_filters"):
                 st.session_state.pop("segmented_df", None)
-                st.experimental_rerun()
+                st.rerun()
         else:
             st.info("Load a dataset to enable filters")
 
@@ -364,6 +392,7 @@ if nav == "Upload & Clean":
                 st.session_state.pop(k, None)
             st.success("Cleared current dataset")
 
+# ────────────────────────────── BENCHMARKS ──────────────────────────────
 if nav == "SME Benchmarks":
     st.subheader("Configure & Run Benchmarks")
     if "dataset_id" not in st.session_state:
@@ -375,12 +404,10 @@ if nav == "SME Benchmarks":
     num_cols = coerce_numeric_candidates(df_here) if df_here is not None else []
     cat_cols = candidate_categories(df_here) if df_here is not None else []
 
-    task_options = []
-    task_defaults = []
+    task_options, task_defaults = [], []
     task_options.append("ingest"); task_defaults.append("ingest")
     if num_cols:
-        task_options.append("filter"); task_defaults.append("filter")
-        task_options.append("sort"); task_defaults.append("sort")
+        task_options += ["filter", "sort"]; task_defaults += ["filter", "sort"]
     if cat_cols and num_cols:
         task_options.append("groupby"); task_defaults.append("groupby")
 
@@ -451,12 +478,15 @@ if nav == "SME Benchmarks":
             if agg_cols:
                 agg = dfb.groupby(["task", "engine"])[agg_cols].mean().reset_index()
                 if "time_s" in agg.columns:
-                    fig1 = px.bar(agg, x="engine", y="time_s", color="engine", facet_col="task", facet_col_wrap=3, title="Mean execution time (s) by engine per task", height=480)
+                    fig1 = px.bar(agg, x="engine", y="time_s", color="engine", facet_col="task", facet_col_wrap=3,
+                                  title="Mean execution time (s) by engine per task", height=480)
                     st.plotly_chart(fig1, use_container_width=True)
                 if "rss_mb" in agg.columns:
-                    fig2 = px.bar(agg, x="engine", y="rss_mb", color="engine", facet_col="task", facet_col_wrap=3, title="Mean peak RSS (MB) by engine per task", height=480)
+                    fig2 = px.bar(agg, x="engine", y="rss_mb", color="engine", facet_col="task", facet_col_wrap=3,
+                                  title="Mean peak RSS (MB) by engine per task", height=480)
                     st.plotly_chart(fig2, use_container_width=True)
 
+# ────────────────────────────── DASHBOARD ──────────────────────────────
 if nav == "Dashboard":
     st.subheader("Dashboard")
     df = get_df()
@@ -468,11 +498,15 @@ if nav == "Dashboard":
         k2.metric("Columns", f"{df.shape[1]:,}")
         k3.metric("Numeric", f"{len(pick_numeric(df)):,}")
         k4.metric("Memory (MB)", f"{df.memory_usage(deep=True).sum()/1e6:,.2f}")
+
         st.markdown("Missing data")
         miss = (df.isna().mean() * 100).loc[lambda s: s > 0].sort_values(ascending=False)
         if not miss.empty:
-            figm = px.bar(miss.reset_index().rename(columns={"index": "column", 0: "pct_missing"}), x="pct_missing", y="column", orientation="h", title="Percent Missing by Column", height=420)
+            figm = px.bar(miss.reset_index().rename(columns={"index": "column", 0: "pct_missing"}),
+                          x="pct_missing", y="column", orientation="h",
+                          title="Percent Missing by Column", height=420)
             st.plotly_chart(figm, use_container_width=True)
+
         st.markdown("Top and bottom records")
         nums = pick_numeric(df)
         if nums:
@@ -489,6 +523,7 @@ if nav == "Dashboard":
         else:
             st.info("No numeric columns found")
 
+# ────────────────────────────── VISUALIZE ──────────────────────────────
 if nav == "Visualize":
     st.subheader("Visualize")
     df = get_df()
@@ -502,16 +537,15 @@ if nav == "Visualize":
                 figc = px.imshow(df[nums].corr(), text_auto=True, title="Correlation matrix")
                 st.plotly_chart(figc, use_container_width=True)
             for c in nums:
-                f1 = px.histogram(df, x=c, nbins=30, title=f"Histogram: {c}")
-                st.plotly_chart(f1, use_container_width=True)
-                f2 = px.box(df, y=c, title=f"Outliers: {c}")
-                st.plotly_chart(f2, use_container_width=True)
-        cats = [c for c in df.select_dtypes(include=["object"]).columns]
+                st.plotly_chart(px.histogram(df, x=c, nbins=30, title=f"Histogram: {c}"), use_container_width=True)
+                st.plotly_chart(px.box(df, y=c, title=f"Outliers: {c}"), use_container_width=True)
+        cats = [c for c in df.select_dtypes(include=["object","category"]).columns]
         for c in cats[:6]:
             counts = df[c].value_counts().rename_axis(c).reset_index(name="count")
             fb = px.bar(counts, x=c, y="count", title=f"Distribution: {c}")
             st.plotly_chart(fb, use_container_width=True)
 
+# ────────────────────────────── FORECAST ──────────────────────────────
 if nav == "Forecast":
     st.subheader("Forecast")
     df = get_df()
@@ -586,7 +620,7 @@ if nav == "Forecast":
                             tst2 = test.set_index("ds")["y"].to_frame()
                             dfj3 = tst2.join(df_hw.reindex(tst2.index).dropna(), how="inner")
                             rmse = float(np.sqrt(((dfj3.y - dfj3.yhat_hw) ** 2).mean()))
-                            mape = float((np.abs(dfj3.y - dfj3.yhat_hw) / dfj3.y.replace(0, np.nan)).dropna().mean() * 100)
+                            mape = float((np.abs[dfj3.y - dfj3.yhat_hw] / dfj3.y.replace(0, np.nan)).dropna().mean() * 100) if len(dfj3) else float("nan")
                             perf.append({"Model": "Holt-Winters", "RMSE": rmse, "MAPE": mape})
                         except Exception as e:
                             st.warning(f"Holt-Winters skipped: {e}")
@@ -601,6 +635,7 @@ if nav == "Forecast":
                             fig.update_layout(title=f"{name} Forecast vs Actual", xaxis_title="Date", yaxis_title=v_col)
                             st.plotly_chart(fig, use_container_width=True)
 
+# ────────────────────────────── SUMMARY ──────────────────────────────
 if nav == "Summary":
     st.subheader("Executive Summary")
     df = get_df()
@@ -617,13 +652,14 @@ if nav == "Summary":
                 med = df[c].median()
                 cols[i].metric(label=c, value=f"{total:,.0f}", delta=f"μ={mean:.1f}, ˜={med:.1f}")
         st.divider()
-        cats = [c for c in df.select_dtypes(include=["object"]).columns if df[c].nunique() <= 50]
+        cats = [c for c in df.select_dtypes(include=["object","category"]).columns if df[c].nunique() <= 50]
         if cats:
             cat = st.selectbox("Category breakdown", cats, key="sum_cat")
             counts = df[cat].value_counts().rename_axis(cat).reset_index(name="count")
             fig = px.pie(counts, names=cat, values="count", title=f"{cat} Distribution")
             st.plotly_chart(fig, use_container_width=True)
 
+# ────────────────────────────── DOWNLOADS ──────────────────────────────
 if nav == "Download":
     st.subheader("Downloads")
     df = get_df()
@@ -637,10 +673,14 @@ if nav == "Download":
         csvb = dfb.to_csv(index=False).encode("utf-8")
         st.download_button("Download benchmarks.csv", data=csvb, file_name="benchmarks.csv", mime="text/csv", key="dl_bench")
 
+# ────────────────────────────── SETTINGS ──────────────────────────────
 if nav == "Settings":
     st.subheader("Settings")
-    theme = st.radio("Theme", ["Light", "Dark"], index=0, horizontal=True, key="set_theme")
+    theme = st.radio("Theme", ["Light", "Dark"], index=0, horizontal=True, key="set_theme",
+                     help="Light mode is the default; Dark is opt-in only.")
     st.session_state["theme"] = theme
+    _apply_theme()
+
     export_format = st.selectbox("Default export format", ["CSV", "Excel (.xlsx)"], index=0, key="set_export_fmt")
     st.session_state["export_format"] = export_format
     default_date_fmt = st.text_input("Default Date Format", value=st.session_state.get("date_format", "%Y-%m-%d"), key="set_datefmt")
