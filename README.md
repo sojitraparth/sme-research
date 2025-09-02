@@ -101,7 +101,7 @@ furnished to do so, subject to the following conditions:
 
 ⸻
 
-Drop-in CITATION.cff
+##  Drop-in CITATION.cff
 
 cff-version: 1.2.0
 message: If you use this software, please cite it as below.
@@ -121,7 +121,7 @@ abstract: >
 
 ⸻
 
-requirements.txt (pin what you used)
+## requirements.txt (pin what you used)
 
 fastapi==0.111.0
 uvicorn[standard]==0.30.0
@@ -133,67 +133,3 @@ psutil==5.9.8
 streamlit==1.36.0
 plotly==5.22.0
 numpy==1.26.4
-
-
-⸻
-
-GitHub Actions CI (.github/workflows/ci.yml)
-
-name: ci
-on:
-  push: { branches: [ main ] }
-  pull_request: { branches: [ main ] }
-
-jobs:
-  lint-test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: [ "3.10", "3.11" ]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: ${{ matrix.python-version }} }
-      - run: python -m pip install -U pip
-      - run: pip install -r requirements.txt black ruff
-      - name: Lint (ruff)
-        run: ruff check .
-      - name: Format check (black)
-        run: black --check .
-      - name: Smoke import
-        run: python - <<'PY'
-import importlib; importlib.import_module("labbench.runner"); importlib.import_module("api.main"); print("ok")
-PY
-
-(This avoids heavy tests but protects against broken imports.)
-
-⸻
-
-Release & DOI (recommended)
-	1.	Tag & Release
-
-git tag -a v1.0.0 -m "camera-ready"
-git push origin v1.0.0
-
-On GitHub → Releases → Create release and upload the figures/ and tables/ zips.
-
-	2.	Zenodo DOI
-	•	Connect the repo to Zenodo (one click), create a DOI for the v1.0.0 release.
-	•	Add the DOI badge to the top of your README.md.
-
-Badge snippet:
-
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.xxxxxxx.svg)](https://doi.org/10.5281/zenodo.xxxxxxx)
-
-
-⸻
-
-GitHub Pages (optional but slick)
-	•	Create docs/index.md with a short landing page and figure thumbnails.
-	•	In repository settings → Pages → docs/ → deploy from main.
-
-Minimal docs/index.md:
-
-# SME Research Lab (paper artefacts)
-
-This site hosts figures and tables for the study.
