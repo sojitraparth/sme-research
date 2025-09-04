@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 SME Research – Analysis Toolkit
 Reads results/benchmarks.csv and produces figure-ready tables:
@@ -22,7 +22,6 @@ BENCH = Path("results/benchmarks.csv")
 OUTDIR = Path("results/derived")
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
-# ---------- Effect sizes ----------
 def pooled_sd(x: np.ndarray, y: np.ndarray) -> float:
     n1, n2 = len(x), len(y)
     if n1 < 2 or n2 < 2:
@@ -67,7 +66,6 @@ def common_language_es(x: np.ndarray, y: np.ndarray) -> float:
         gt += np.sum(xi > y)
     return gt / (len(x) * len(y))
 
-# ---------- Helpers ----------
 def _pairs(seq: List[str]) -> List[Tuple[str, str]]:
     return [p for p in itertools.combinations(sorted(seq), 2)]
 
@@ -75,7 +73,6 @@ def _series(df: pd.DataFrame, engine: str) -> np.ndarray:
     s = df.loc[df["engine"] == engine, "time_s"].dropna().to_numpy()
     return s.astype(float)
 
-# ---------- Main analysis ----------
 def main() -> None:
     if not BENCH.exists():
         print("No results/benchmarks.csv found. Run a benchmark first.")
